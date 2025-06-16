@@ -1,0 +1,25 @@
+I noticed in line 14, “productId “is being directly concatenated in the sql query, this is not safe, as we could have customers manipulate the posted value to modify the SQL statement and potentially dump the database etc.
+
+The solution would be to use prepared statements.
+
+Line 48, line 60 and line 129 also directly takes user input and directly concatenates it as part of the sql query, this is unsafe as anyone can maliciously run a SQL injection attach, whereby they may run another query, always use prepared statements and never place any trust on user input
+
+The addToCart function has many issues. There is a potential race condition if multiple users are about to order the same item, as there is no reservation feature there is nothing stopping other users to add an item to the cart and potentially checking out, someone or multiple users are going to be disappointed seeing as they saw the item was in-stock whereas it wasn’t.  
+
+As discussed above we are not using prepared statements which could result in a SQL injection attach as we are directly trusting the users input, we could also use msqlis escape string function, the clever thing with this function is that it will turn any input in to a valid sql string, so it won’t ever be interpreted as a SQL statement, as we would never want to run a user input as a SQL statement.
+
+In addition I prefer using typing hinting for all functions now, productid and quantity are both integers, having it in the function signature makes it clearer, we should also validate and ensure productid and quantity are ints and are positive numbers etc.
+
+The getTotal function has a few issues, firstly as above it is prone to the sql injection attack as its not sanitizing user input or using prepared statements. In addition, if we have more then 1 item in the card it will be looping over every item and performing a query to the database which places extra load in the database but more importantly increases latency for the end user. 
+
+We could fetch all the data we need in 1 query such as “select price from products where id in (1,2,3)”  this would reduce the round trip needed to exactly 1. 
+We are also not handling any errors, so if the query doesn’t return anything back we may end up in a errored state frustrating the user as no information would be displayed back to them.
+
+The applyDiscount function is vulnerable to sql injection attack, in addition we are comparing dates but using 2 different types a datetime and a string, it would be best to compare datetime types together, so converting $discount[‘expires’] to a datetime would be better.
+
+The getFinalTotal has some issues, firstly it is not verifying  $_SESSION[‘discount’] is valid and the range is ok, we need to do this to validate the discount percantages are not corrupted, we cannot just blindly follow the session variable in case it has been corrupted due to a vulnerability in our code as seen throughout this code.
+We should run some non-context based checks such as ensuing the total doesn’t go negative and the discount range matches the business logic like if 99%  off is not ever possible (based on business) we could guard against that in the code before even checking the discount codes.
+
+The checkout code should be done in an anatomic way, it should all succeed or should all fail, the lack of transactions could cause in consistent data, like some items stock updating and others not, and there is no ability to roll back if an item is out of stock, the code is not even checking to see the stock level before updating the stock. 
+
+In short using transactions is best practice to keep data consistent, as if anything goes wrong we can rollback without having to commit.

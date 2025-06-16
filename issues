@@ -1,0 +1,30 @@
+Reported Issues
+
+Security Alert: The security team flagged potential SQL injection vulnerabilities
+
+Pricing Bug: Some customers are getting incorrect totals, especially with discounts
+
+Inventory Issue: Products are showing as out of stock when they shouldn't be, and sometimes oversold
+
+Checkout Problem: Orders occasionally fail to process completely, leaving partial data
+
+Performance Issue: Cart page loads very slowly when customers have many items
+
+Data Integrity: Some orders appear in the database with missing or incorrect information
+
+
+Identify all security vulnerabilities and explain the risks
+
+Find logic errors that could cause incorrect calculations or data
+
+Spot potential race conditions or concurrency issues
+
+Identify performance problems and suggest optimizations
+
+Find any other bugs that could affect functionality
+
+Recommend best practices for improvement
+
+
+
+https://docs.google.com/forms/d/e/1FAIpQLSdlgeuOrYy_hkJ96sF54KHeeJOLFb-LIsVB22Bn-qXZbBDosA/formResponse

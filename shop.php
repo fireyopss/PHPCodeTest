@@ -9,19 +9,33 @@ class ShoppingCart {
         $this->db = $database;
     }
     
-    // Add item to cart
+    // Add item to cart (prepared statement)
     public function addToCart($productId , $quantity) {
-        $query = "SELECT * FROM products WHERE id = " . $productId;
-        $result = mysqli_query($this->db, $query);
+        $stmt = mysqli_prepare($this->db, "SELECT stock FROM products WHERE id = ?");
+        mysqli_stmt_bind_param($stmt, "i", $productId);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
         $product = mysqli_fetch_assoc($result);
+        mysqli_stmt_close($stmt);
         
         if (!$product) {
             return false;
         }
         
-        if ($product['stock'] < $quantity) {
-            return false;
+        $currentQuantity = isset($_SESSION['cart'][$productId]) ? $_SESSION['cart'][$productId] : 0;
+
+       
+        $newQuantity = $currentQuantity + $quantity;
+        if ($newQuantity <= 0) {
+            return false; // Prevent adding zero or negative quantity
         }
+
+        // Check stock
+        if ($product['stock'] < $newQuantity) {
+            return false; // Not enough stock
+        }
+
+    
         
         if (!isset($_SESSION['cart'])) {
             $_SESSION['cart'] = array();
@@ -36,7 +50,7 @@ class ShoppingCart {
         return true;
     }
     
-    // Calculate total price
+    // Calculate total price (prepared statement)
     public function getTotal() {
         $total = 0;
         
@@ -44,22 +58,32 @@ class ShoppingCart {
             return $total;
         }
         
+        $stmt = mysqli_prepare($this->db, "SELECT price FROM products WHERE id = ?");
+        
         foreach ($_SESSION['cart'] as $productId => $quantity) {
-            $query = "SELECT price FROM products WHERE id = " . $productId;
-            $result = mysqli_query($this->db, $query);
+            mysqli_stmt_bind_param($stmt, "i", $productId);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
             $product = mysqli_fetch_assoc($result);
             
-            $total += $product['price'] * $quantity;
+            if ($product) {
+                $total += $product['price'] * $quantity;
+            }
         }
+        
+        mysqli_stmt_close($stmt);
         
         return $total;
     }
     
-    // Apply discount code
+    // Apply discount code (prepared statement)
     public function applyDiscount($code) {
-        $query = "SELECT * FROM discount_codes WHERE code = '" . $code . "'";
-        $result = mysqli_query($this->db, $query);
+        $stmt = mysqli_prepare($this->db, "SELECT percentage, expires FROM discount_codes WHERE code = ?");
+        mysqli_stmt_bind_param($stmt, "s", $code);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
         $discount = mysqli_fetch_assoc($result);
+        mysqli_stmt_close($stmt);
         
         if ($discount && $discount['expires'] > date('Y-m-d')) {
             $_SESSION['discount'] = $discount['percentage'];
@@ -84,45 +108,87 @@ class ShoppingCart {
     public function clearAllCart(){
         unset($_SESSION['cart']);
         header("Location: shop.php");
+        exit;
     }
     
-    // Process checkout
-    public function checkout($userId, $paymentMethod) {
-        $total = $this->getFinalTotal();
-        
-        if ($total <= 0) {
-            return false;
-        }
-        
-        // Create order
-        $orderQuery = "INSERT INTO orders (user_id, total, payment_method, status) 
-                      VALUES ($userId, $total, '$paymentMethod', 'pending')";
-        
-        if (!mysqli_query($this->db, $orderQuery)) {
-            return false;
-        }
-        
-        $orderId = mysqli_insert_id($this->db);
-        
-        // Add order items and update stock
+    // Process checkout with transaction and stock check
+   public function checkout($userId, $paymentMethod) {
+    if (empty($_SESSION['cart'])) {
+        echo "Cart is empty";
+        return false;
+    }
+
+    $total = $this->getFinalTotal();
+    
+    if ($total <= 0) {
+        echo "Total must be greater than zero";
+        return false;
+    }
+
+    // Start transaction
+    $this->db->begin_transaction();
+
+    try {
+        // Re-check stock for each product in cart
+        $stmtStockCheck = $this->db->prepare("SELECT stock FROM products WHERE id = ? FOR UPDATE");
         foreach ($_SESSION['cart'] as $productId => $quantity) {
-            $itemQuery = "INSERT INTO order_items (order_id, product_id, quantity) 
-                         VALUES ($orderId, $productId, $quantity)";
-            mysqli_query($this->db, $itemQuery);
-            
-            $updateStock = "UPDATE products SET stock = stock - $quantity 
-                           WHERE id = $productId";
-            mysqli_query($this->db, $updateStock);
+            $stmtStockCheck->bind_param("i", $productId);
+            $stmtStockCheck->execute();
+            $result = $stmtStockCheck->get_result();
+            $product = $result->fetch_assoc();
+
+            if (!$product || $product['stock'] < $quantity) {
+                $stmtStockCheck->close();
+                $this->db->rollback();
+                
+                return false;
+            }
         }
+        $stmtStockCheck->close();
+
+        // Insert order
+        $stmtOrder = $this->db->prepare("INSERT INTO orders (user_id, total, payment_method, status) VALUES (?, ?, ?, 'pending')");
+        $stmtOrder->bind_param("ids", $userId, $total, $paymentMethod);
+        if (!$stmtOrder->execute()) {
+            throw new Exception("Failed to create order");
+        }
+        $orderId = $this->db->insert_id;
+        $stmtOrder->close();
+
+        // Insert order items and update stock
+        $stmtInsertItem = $this->db->prepare("INSERT INTO order_items (order_id, product_id, quantity) VALUES (?, ?, ?)");
+        $stmtUpdateStock = $this->db->prepare("UPDATE products SET stock = stock - ? WHERE id = ?");
         
-        // Clear cart
-        unset($_SESSION['cart']);
-        unset($_SESSION['discount']);
-        
+        foreach ($_SESSION['cart'] as $productId => $quantity) {
+            $stmtInsertItem->bind_param("iii", $orderId, $productId, $quantity);
+            if (!$stmtInsertItem->execute()) {
+                throw new Exception("Failed to insert order item");
+            }
+
+            $stmtUpdateStock->bind_param("ii", $quantity, $productId);
+            if (!$stmtUpdateStock->execute()) {
+                throw new Exception("Failed to update stock");
+            }
+        }
+        $stmtInsertItem->close();
+        $stmtUpdateStock->close();
+
+        // Commit transaction
+        $this->db->commit();
+
+        // Clear cart and discount session
+        unset($_SESSION['cart'], $_SESSION['discount']);
+
         return $orderId;
+
+    } catch (Exception $e) {
+        $this->db->rollback();
+        // Optionally log error: error_log($e->getMessage());
+        return false;
     }
-    
-    // Get cart contents for display
+}
+
+    // Get cart contents for display (prepared statement)
     public function getCartContents() {
         $contents = array();
         
@@ -130,24 +196,33 @@ class ShoppingCart {
             return $contents;
         }
         
+        $stmt = mysqli_prepare($this->db, "SELECT * FROM products WHERE id = ?");
+        
         foreach ($_SESSION['cart'] as $productId => $quantity) {
-            $query = "SELECT * FROM products WHERE id = " . $productId;
-            $result = mysqli_query($this->db, $query);
+            mysqli_stmt_bind_param($stmt, "i", $productId);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
             $product = mysqli_fetch_assoc($result);
             
-            $contents[] = array(
-                'product' => $product,
-                'quantity' => $quantity,
-                'subtotal' => $product['price'] * $quantity
-            );
+            if ($product) {
+                $contents[] = array(
+                    'product' => $product,
+                    'quantity' => $quantity,
+                    'subtotal' => $product['price'] * $quantity
+                );
+            }
         }
+        
+        mysqli_stmt_close($stmt);
         
         return $contents;
     }
 }
 
+
+
 // Usage example
-$db = mysqli_connect('127.0.0.1', '', '', '');
+$db = mysqli_connect('127.0.0.1', 'root', 'Ta123lo09@', 'vul');
 
 if (isset($_POST['action'])) {
     $cart = new ShoppingCart($db);
@@ -167,11 +242,11 @@ if (isset($_POST['action'])) {
             break;
             
         case 'checkout':
-            $orderId = $cart->checkout($_SESSION['user_id'], $_POST['payment_method']);
+            $orderId = $cart->checkout($_POST['user_id'], $_POST['payment_method']);
             if ($orderId) {
                 echo "Order created: " . $orderId;
             } else {
-                echo "Checkout failed";
+                echo "Checkout failed, stock may be insufficient or cart is empty";
             }
             break;
             
@@ -305,6 +380,8 @@ if (isset($_POST['action'])) {
 
         <form method="POST">
             <input type="hidden" name="action" value="checkout">
+             <input type="hidden" name="user_id" value="1"> <!-- not recommended to trust user_id but for demo -->
+
             <label for="payment_method">Payment Method:</label>
             <select name="payment_method" id="payment_method" required>
                 <option value="">Select</option>
